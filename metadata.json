@@ -1,0 +1,11 @@
+{
+  "name": "Provenance",
+  "description": "Every object has a history. Point your phone camera at any object or building to read it the way a historian, curator and museum docent would.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
