@@ -17,6 +17,7 @@ import {
   shouldGateConfidence,
   sanitizeTimeline,
   parseYearNumber,
+  mapCuratorialErrorMessage,
 } from './pure-logic.ts';
 
 test('formatAccessionNumber formats correctly with sequence numbers', () => {
@@ -132,4 +133,54 @@ test('validateInterpretResponse includes searchQueries and modelUsed', () => {
     'Bic Cristal patent history',
     'Marcel Bich ballpoint production 1950',
   ]);
+});
+
+test('mapCuratorialErrorMessage maps 503, 429, and other errors to calm curatorial notices', () => {
+  // 503 / High demand variations
+  assert.equal(
+    mapCuratorialErrorMessage('503 Service Unavailable'),
+    'The archive is busy right now. Trying again usually works.'
+  );
+  assert.equal(
+    mapCuratorialErrorMessage('This model is currently experiencing high demand'),
+    'The archive is busy right now. Trying again usually works.'
+  );
+  assert.equal(
+    mapCuratorialErrorMessage({
+      error: { code: 503, message: 'This model is currently experiencing high demand' },
+    }),
+    'The archive is busy right now. Trying again usually works.'
+  );
+
+  // 429 / Quota / Resource exhausted variations
+  assert.equal(
+    mapCuratorialErrorMessage('429 Too Many Requests'),
+    'The daily research quota is used up. Try again shortly.'
+  );
+  assert.equal(
+    mapCuratorialErrorMessage('RESOURCE_EXHAUSTED: Quota exceeded for quota metric'),
+    'The daily research quota is used up. Try again shortly.'
+  );
+  assert.equal(
+    mapCuratorialErrorMessage(new Error('Rate limit exceeded: 429')),
+    'The daily research quota is used up. Try again shortly.'
+  );
+
+  // Other / generic errors
+  assert.equal(
+    mapCuratorialErrorMessage('500 Internal Server Error'),
+    'The reading could not be completed.'
+  );
+  assert.equal(
+    mapCuratorialErrorMessage(new Error('SyntaxError: Unexpected token')),
+    'The reading could not be completed.'
+  );
+  assert.equal(
+    mapCuratorialErrorMessage(null),
+    'The reading could not be completed.'
+  );
+  assert.equal(
+    mapCuratorialErrorMessage(undefined),
+    'The reading could not be completed.'
+  );
 });

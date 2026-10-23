@@ -45,6 +45,50 @@ export function formatAccessionNumber(
 }
 
 /**
+ * Maps raw backend or API error messages into calm, user-facing museum notices.
+ * Never exposes raw API error JSON, stack traces, or technical error blobs.
+ */
+export function mapCuratorialErrorMessage(rawError: unknown): string {
+  if (!rawError) return 'The reading could not be completed.';
+
+  let str = '';
+  if (typeof rawError === 'string') {
+    str = rawError;
+  } else if (rawError instanceof Error) {
+    str = rawError.message;
+  } else if (typeof rawError === 'object' && rawError !== null) {
+    try {
+      str = JSON.stringify(rawError);
+    } catch {
+      str = String(rawError);
+    }
+  } else {
+    str = String(rawError);
+  }
+
+  const lower = str.toLowerCase();
+
+  if (
+    str.includes('503') ||
+    lower.includes('high demand') ||
+    lower.includes('unavailable')
+  ) {
+    return 'The archive is busy right now. Trying again usually works.';
+  }
+
+  if (
+    str.includes('429') ||
+    lower.includes('quota') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('rate limit')
+  ) {
+    return 'The daily research quota is used up. Try again shortly.';
+  }
+
+  return 'The reading could not be completed.';
+}
+
+/**
  * Robustly parses a JSON string, stripping markdown fences, leading/trailing prose,
  * and handles slight syntax imperfections.
  */

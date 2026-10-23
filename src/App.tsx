@@ -24,7 +24,7 @@ import {
 } from './services/storage.ts';
 import { speechService } from './services/speech.ts';
 import { getDeviceLocationWithTimeout } from './services/location.ts';
-import { shouldGateConfidence } from './utils/pure-logic.ts';
+import { shouldGateConfidence, mapCuratorialErrorMessage } from './utils/pure-logic.ts';
 
 export default function App() {
   const [view, setView] = useState<AppView>('viewfinder');
@@ -107,8 +107,7 @@ export default function App() {
         }
       } catch (err: unknown) {
         console.warn('Interpret call error:', err);
-        const msg = err instanceof Error ? err.message : String(err);
-        setInterpretError(msg);
+        setInterpretError(mapCuratorialErrorMessage(err));
         setIsInterpreting(false);
         setInterpretPhase(null);
       }
@@ -175,8 +174,7 @@ export default function App() {
         }
       } catch (err: unknown) {
         console.error('Observe call failed:', err);
-        const msg = err instanceof Error ? err.message : String(err);
-        setObserveError(msg);
+        setObserveError(mapCuratorialErrorMessage(err));
         setIsObserving(false);
       }
     },

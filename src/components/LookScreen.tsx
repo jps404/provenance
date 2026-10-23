@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import type { ObserveResponse } from '../types.ts';
 import { ArrowRight, RotateCcw, Sparkles, Eye, AlertCircle } from 'lucide-react';
+import { mapCuratorialErrorMessage } from '../utils/pure-logic.ts';
 
 interface LookScreenProps {
   imageSrc: string;
@@ -79,7 +80,7 @@ export const LookScreen: React.FC<LookScreenProps> = ({
               <span>Observation Interrupted</span>
             </div>
             <p className="text-sm text-[#F2EEE5]/90 mb-4 font-sans">
-              {observeError}
+              {mapCuratorialErrorMessage(observeError)}
             </p>
             <div className="flex gap-3">
               <button

@@ -12,6 +12,7 @@ import {
   cleanAndParseJson,
   validateObserveResponse,
   validateInterpretResponse,
+  mapCuratorialErrorMessage,
 } from './src/utils/pure-logic.ts';
 
 dotenv.config();
@@ -251,10 +252,9 @@ app.post('/api/observe', async (req: Request, res: Response) => {
     console.error('Error in /api/observe:', error);
     const message = error instanceof Error ? error.message : String(error);
     const isQuota = message.includes('429') || message.includes('quota') || message.includes('RESOURCE_EXHAUSTED');
-    return res.status(isQuota ? 429 : 500).json({
-      error: isQuota
-        ? 'The AI quota on this Google account is used up for now. Try again in a minute.'
-        : `Observation failed: ${message}`,
+    const isBusy = message.includes('503') || message.toLowerCase().includes('high demand') || message.includes('UNAVAILABLE');
+    return res.status(isQuota ? 429 : isBusy ? 503 : 500).json({
+      error: mapCuratorialErrorMessage(error),
     });
   }
 });
@@ -359,7 +359,85 @@ app.post('/api/interpret', async (req: Request, res: Response) => {
     let finalSearchQueries: string[] = [];
     let lastError: unknown = null;
 
-    // Try models in order. Only the final model (gemini-3.1-flash-lite) may drop googleSearch.
+    // Helper to run a stream attempt for a given model and search configuration.
+    // Stream creation AND reading of the first chunk are awaited inside the attempt.
+    // If it throws 503/429/404/timeout before any text has been received, it throws and does not commit.
+    // Only after the first text chunk is forwarded is the attempt committed.
+    const executeStreamAttempt = async (
+      candidateModel: string,
+      withSearch: boolean
+    ): Promise<{
+      text: string;
+      groundingChunks: any[];
+      searchQueries: string[];
+    }> => {
+      const streamPromise = ai.models.generateContentStream({
+        model: candidateModel,
+        ...makePayload(withSearch),
+      });
+
+      const stream = await withTimeout(
+        streamPromise,
+        INTERPRET_TIMEOUT_MS,
+        `InterpretStream (${candidateModel})`
+      );
+
+      const iterator = stream[Symbol.asyncIterator]();
+      const firstChunkResult = await withTimeout(
+        iterator.next(),
+        INTERPRET_TIMEOUT_MS,
+        `InterpretFirstChunk (${candidateModel})`
+      );
+
+      if (firstChunkResult.done) {
+        throw new Error(`Stream closed immediately with no chunks (${candidateModel})`);
+      }
+
+      // First chunk arrived successfully! Attempt is now committed.
+      sendEvent({ type: 'phase', phase: 'Drafting museum interpretation...' });
+
+      let textAccumulator = '';
+      const groundingChunks: any[] = [];
+      const searchQueries: string[] = [];
+
+      const recordChunkData = (chunk: any) => {
+        if (chunk?.text) {
+          textAccumulator += chunk.text;
+        }
+        const candidate = chunk?.candidates?.[0];
+        if (candidate?.groundingMetadata?.groundingChunks) {
+          groundingChunks.push(...candidate.groundingMetadata.groundingChunks);
+        }
+        if (candidate?.groundingMetadata?.webSearchQueries) {
+          searchQueries.push(...candidate.groundingMetadata.webSearchQueries);
+        }
+      };
+
+      recordChunkData(firstChunkResult.value);
+
+      // Consume remainder of stream
+      while (true) {
+        const nextResult = await withTimeout(
+          iterator.next(),
+          INTERPRET_TIMEOUT_MS,
+          `InterpretRemainingChunk (${candidateModel})`
+        );
+        if (nextResult.done) break;
+        recordChunkData(nextResult.value);
+      }
+
+      if (!textAccumulator.trim()) {
+        throw new Error(`Stream returned empty text (${candidateModel})`);
+      }
+
+      return {
+        text: textAccumulator,
+        groundingChunks,
+        searchQueries,
+      };
+    };
+
+    // Try models in order. Only the final model (gemini-3.1-flash-lite) starts without googleSearch.
     for (let i = 0; i < MODEL_FALLBACK_CHAIN.length; i++) {
       const candidateModel = MODEL_FALLBACK_CHAIN[i];
       const isFinalModel = i === MODEL_FALLBACK_CHAIN.length - 1;
@@ -374,46 +452,15 @@ app.post('/api/interpret', async (req: Request, res: Response) => {
             : `Synthesizing curatorial reading with ${candidateModel}...`,
         });
 
-        const streamPromise = ai.models.generateContentStream({
-          model: candidateModel,
-          ...makePayload(useSearch),
-        });
-
-        const stream = await withTimeout(
-          streamPromise,
-          INTERPRET_TIMEOUT_MS,
-          `InterpretStream (${candidateModel})`
-        );
-
-        let streamedChunksCount = 0;
-        let textAccumulator = '';
-
-        for await (const chunk of stream) {
-          streamedChunksCount++;
-          if (streamedChunksCount === 1) {
-            sendEvent({ type: 'phase', phase: 'Drafting museum interpretation...' });
-          }
-
-          if (chunk.text) {
-            textAccumulator += chunk.text;
-          }
-
-          // Extract grounding metadata from chunks
-          const candidate = chunk.candidates?.[0];
-          if (candidate?.groundingMetadata?.groundingChunks) {
-            finalGroundingChunks.push(...candidate.groundingMetadata.groundingChunks);
-          }
-          if (candidate?.groundingMetadata?.webSearchQueries) {
-            finalSearchQueries.push(...candidate.groundingMetadata.webSearchQueries);
-          }
-        }
-
+        const attemptResult = await executeStreamAttempt(candidateModel, useSearch);
         const elapsed = Date.now() - attemptStart;
-        fullText = textAccumulator;
+        fullText = attemptResult.text;
+        finalGroundingChunks = attemptResult.groundingChunks;
+        finalSearchQueries = attemptResult.searchQueries;
         modelUsed = candidateModel;
         isUnsourced = !useSearch || finalGroundingChunks.length === 0;
 
-        console.log(`[Interpret] model=${candidateModel} outcome=ok status=200 search=${useSearch} ms=${elapsed} chunks=${streamedChunksCount}`);
+        console.log(`[Interpret] model=${candidateModel} outcome=ok status=200 search=${useSearch} ms=${elapsed}`);
         break;
       } catch (err: any) {
         lastError = err;
@@ -422,37 +469,40 @@ app.post('/api/interpret', async (req: Request, res: Response) => {
         const errMsg = err.message || String(err);
         console.log(`[Interpret] model=${candidateModel} outcome=failed status=${status} search=${useSearch} ms=${elapsed} error="${errMsg.slice(0, 80)}"`);
 
-        // If this is the final model and it failed with search, retry that final model once without search
-        if (isFinalModel && useSearch) {
-          const finalRetryStart = Date.now();
-          try {
-            sendEvent({ type: 'phase', phase: `Drafting unsourced reading with ${candidateModel}...` });
-            const fallbackStream = await withTimeout(
-              ai.models.generateContentStream({
-                model: candidateModel,
-                ...makePayload(false),
-              }),
-              INTERPRET_TIMEOUT_MS,
-              `InterpretStream-FinalFallback (${candidateModel})`
-            );
+        // If a model fails with 429 while googleSearch is enabled,
+        // retry that SAME model once without the search tool before moving on (search has its own quota),
+        // and mark the reading Unsourced.
+        const is429 =
+          status === 429 ||
+          errMsg.includes('429') ||
+          errMsg.includes('RESOURCE_EXHAUSTED') ||
+          errMsg.toLowerCase().includes('quota');
 
-            let textAccum = '';
-            for await (const chunk of fallbackStream) {
-              if (chunk.text) textAccum += chunk.text;
-            }
-            const fallbackElapsed = Date.now() - finalRetryStart;
-            fullText = textAccum;
+        if (is429 && useSearch) {
+          const retryStart = Date.now();
+          try {
+            sendEvent({
+              type: 'phase',
+              phase: `Drafting unsourced reading with ${candidateModel}...`,
+            });
+            const retryResult = await executeStreamAttempt(candidateModel, false);
+            const retryElapsed = Date.now() - retryStart;
+            fullText = retryResult.text;
+            finalGroundingChunks = retryResult.groundingChunks;
+            finalSearchQueries = retryResult.searchQueries;
             modelUsed = candidateModel;
             isUnsourced = true;
-            console.log(`[Interpret] model=${candidateModel} outcome=ok_unsourced status=200 search=false ms=${fallbackElapsed}`);
+            console.log(`[Interpret] model=${candidateModel} outcome=ok_unsourced_retry status=200 search=false ms=${retryElapsed}`);
             break;
-          } catch (finalErr: any) {
-            lastError = finalErr;
-            const fallbackElapsed = Date.now() - finalRetryStart;
-            console.log(`[Interpret] model=${candidateModel} outcome=failed_final_unsourced status=${finalErr.status || 500} ms=${fallbackElapsed}`);
+          } catch (retryErr: any) {
+            lastError = retryErr;
+            const retryElapsed = Date.now() - retryStart;
+            const retryStatus = retryErr.status || (String(retryErr).includes('TIMEOUT') ? 408 : 500);
+            const retryErrMsg = retryErr.message || String(retryErr);
+            console.log(`[Interpret] model=${candidateModel} outcome=failed_unsourced_retry status=${retryStatus} search=false ms=${retryElapsed} error="${retryErrMsg.slice(0, 80)}"`);
           }
         }
-        // Move to next model immediately
+        // Move to next model immediately without backoff
       }
     }
 
@@ -497,13 +547,9 @@ app.post('/api/interpret', async (req: Request, res: Response) => {
     return res.end();
   } catch (error: unknown) {
     console.error('Error in /api/interpret:', error);
-    const message = error instanceof Error ? error.message : String(error);
-    const isQuota = message.includes('429') || message.includes('quota') || message.includes('RESOURCE_EXHAUSTED');
     sendEvent({
       type: 'error',
-      error: isQuota
-        ? 'The AI quota on this Google account is used up for now. Try again in a minute.'
-        : `Interpretation failed: ${message}`,
+      error: mapCuratorialErrorMessage(error),
     });
     return res.end();
   }

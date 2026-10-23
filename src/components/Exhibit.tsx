@@ -9,7 +9,7 @@ import { HotspotImage } from './HotspotImage.tsx';
 import { Timeline } from './Timeline.tsx';
 import { ListenButton } from './ListenButton.tsx';
 import { sharePlacard } from '../utils/placard-canvas.ts';
-import { shouldGateConfidence } from '../utils/pure-logic.ts';
+import { shouldGateConfidence, mapCuratorialErrorMessage } from '../utils/pure-logic.ts';
 import {
   ArrowLeft,
   Globe,
@@ -569,7 +569,7 @@ export const Exhibit: React.FC<ExhibitProps> = ({
                 <div className="p-5 bg-[#FAF7F0] border border-[#6E2B26]/30 text-center space-y-3">
                   <AlertCircle className="w-6 h-6 text-[#6E2B26] mx-auto" />
                   <p className="text-xs text-[#1C1B18]/80 font-sans">
-                    {interpretError}
+                    {mapCuratorialErrorMessage(interpretError)}
                   </p>
                   {onRetryInterpret && (
                     <button
