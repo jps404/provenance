@@ -44,43 +44,43 @@ export const Viewfinder: React.FC<ViewfinderProps> = ({
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isStartingCamera, setIsStartingCamera] = useState<boolean>(true);
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
+  const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
 
-  // Initialize camera with strict 8-second timeout guard
+  // Initialize camera with 8-second timeout notice (does not discard late stream)
   const initCamera = useCallback(async () => {
     setCameraError(null);
     setIsStartingCamera(true);
+    setAutoplayBlocked(false);
 
     if (streamRef.current) {
       stopCamera(streamRef.current);
       streamRef.current = null;
     }
 
-    let timeoutTriggered = false;
     const timeoutId = setTimeout(() => {
-      timeoutTriggered = true;
       setIsStartingCamera(false);
-      setCameraActive(false);
-      setCameraError(
-        'Camera feed did not start or permission was pending. You can use the photo button below to capture or select an image directly.'
-      );
+      // Show unavailable panel with fallback if camera has not activated yet,
+      // but do NOT abort or stop a stream that might resolve after 8s
+      if (!streamRef.current) {
+        setCameraError(
+          'Camera feed did not start or permission was pending. You can use the photo button below to capture or select an image directly.'
+        );
+      }
     }, 8000);
 
     try {
       const { stream } = await startCamera();
       clearTimeout(timeoutId);
 
-      if (timeoutTriggered) {
-        stopCamera(stream);
-        return;
-      }
-
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         try {
           await videoRef.current.play();
-        } catch {
-          // Allowed if user gesture is needed
+          setAutoplayBlocked(false);
+        } catch (playErr) {
+          console.warn('Autoplay blocked:', playErr);
+          setAutoplayBlocked(true);
         }
       }
       setCameraActive(true);
@@ -103,6 +103,19 @@ export const Viewfinder: React.FC<ViewfinderProps> = ({
       }
     }
   }, []);
+
+  // Safety net: re-attach stream to video element whenever cameraActive becomes true
+  useEffect(() => {
+    if (cameraActive && streamRef.current && videoRef.current) {
+      if (videoRef.current.srcObject !== streamRef.current) {
+        videoRef.current.srcObject = streamRef.current;
+      }
+      videoRef.current.play().catch((playErr) => {
+        console.warn('Re-attached play blocked:', playErr);
+        setAutoplayBlocked(true);
+      });
+    }
+  }, [cameraActive]);
 
   // Camera lifecycle: start on mount, stop on unmount or tab hide
   useEffect(() => {
@@ -134,6 +147,13 @@ export const Viewfinder: React.FC<ViewfinderProps> = ({
   // Shutter action
   const handleShutter = () => {
     if (!videoRef.current || !cameraActive || isCapturing) return;
+
+    // Fall back to opening the file input instead of capturing a blank frame
+    if (videoRef.current.videoWidth === 0) {
+      fileInputRef.current?.click();
+      return;
+    }
+
     setIsCapturing(true);
 
     try {
@@ -175,54 +195,88 @@ export const Viewfinder: React.FC<ViewfinderProps> = ({
       />
 
       {/* Camera Video Surface or Fallback */}
-      <div className="absolute inset-0 z-0 bg-[#121110] flex items-center justify-center">
-        {cameraActive ? (
-          <video
-            ref={videoRef}
-            playsInline
-            muted
-            autoPlay
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="p-6 text-center max-w-sm mx-auto z-10">
-            {cameraError ? (
-              <div className="bg-[#242321]/90 border border-[#6E2B26] p-5 backdrop-blur-md">
-                <AlertTriangle className="w-8 h-8 text-[#E57373] mx-auto mb-3" />
-                <h3 className="font-serif text-lg font-medium text-white mb-2">
-                  Camera Unavailable
-                </h3>
-                <p className="text-xs text-[#F2EEE5]/80 leading-relaxed font-sans mb-4">
-                  {cameraError}
-                </p>
-                <div className="flex flex-col gap-2">
+      <div className="absolute inset-0 z-0 bg-[#121110] flex items-center justify-center overflow-hidden">
+        {/* Always rendered in DOM to guarantee ref is attached */}
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          autoPlay
+          className={`w-full h-full object-cover transition-opacity duration-300 ${
+            cameraActive ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
+        />
+
+        {/* Autoplay blocked overlay button */}
+        {cameraActive && autoplayBlocked && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <button
+              onClick={async () => {
+                if (videoRef.current) {
+                  try {
+                    await videoRef.current.play();
+                    setAutoplayBlocked(false);
+                  } catch (e) {
+                    console.error('Manual start tap failed:', e);
+                  }
+                }
+              }}
+              className="py-3 px-6 bg-[#6E2B26] text-white font-mono text-xs uppercase tracking-wider rounded shadow-lg flex items-center justify-center gap-2 hover:bg-[#8B3730] transition-colors min-h-[48px]"
+            >
+              <Camera className="w-4 h-4" />
+              <span>Tap to start camera</span>
+            </button>
+          </div>
+        )}
+
+        {/* Error or Starting Panels rendered on top when camera is inactive */}
+        {!cameraActive && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center p-6 bg-[#121110]/90">
+            <div className="text-center max-w-sm mx-auto">
+              {cameraError ? (
+                <div className="bg-[#242321]/95 border border-[#6E2B26] p-5 backdrop-blur-md">
+                  <AlertTriangle className="w-8 h-8 text-[#E57373] mx-auto mb-3" />
+                  <h3 className="font-serif text-lg font-medium text-white mb-2">
+                    Camera Unavailable
+                  </h3>
+                  <p className="text-xs text-[#F2EEE5]/80 leading-relaxed font-sans mb-4">
+                    {cameraError}
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="w-full py-3 px-4 bg-[#6E2B26] text-white font-mono text-xs uppercase tracking-wider flex items-center justify-center gap-2 hover:bg-[#8B3730] transition-colors min-h-[44px]"
+                    >
+                      <ImageIcon className="w-4 h-4" />
+                      <span>Choose or Take Photo</span>
+                    </button>
+                    <button
+                      onClick={initCamera}
+                      className="w-full py-2.5 px-4 bg-white/10 text-white font-mono text-xs uppercase tracking-wider flex items-center justify-center gap-2 hover:bg-white/20 transition-colors min-h-[44px]"
+                    >
+                      <RotateCw className="w-3.5 h-3.5" />
+                      <span>Retry Camera</span>
+                    </button>
+                  </div>
+                </div>
+              ) : isStartingCamera ? (
+                <div className="space-y-3">
+                  <div className="w-8 h-8 border-2 border-white/30 border-t-[#6E2B26] rounded-full animate-spin mx-auto" />
+                  <p className="font-mono text-xs uppercase tracking-widest text-[#F2EEE5]/70">
+                    Starting Viewfinder...
+                  </p>
+                  <p className="font-sans text-[11px] text-[#F2EEE5]/50 mb-3">
+                    Or tap "Photo" below to scan immediately
+                  </p>
                   <button
                     onClick={() => fileInputRef.current?.click()}
-                    className="w-full py-3 px-4 bg-[#6E2B26] text-white font-mono text-xs uppercase tracking-wider flex items-center justify-center gap-2 hover:bg-[#8B3730] transition-colors min-h-[44px]"
+                    className="py-2 px-4 bg-white/10 border border-white/20 text-[#F2EEE5] font-mono text-xs uppercase tracking-wider hover:bg-white/20 transition-colors min-h-[40px]"
                   >
-                    <ImageIcon className="w-4 h-4" />
-                    <span>Choose or Take Photo</span>
-                  </button>
-                  <button
-                    onClick={initCamera}
-                    className="w-full py-2.5 px-4 bg-white/10 text-white font-mono text-xs uppercase tracking-wider flex items-center justify-center gap-2 hover:bg-white/20 transition-colors min-h-[44px]"
-                  >
-                    <RotateCw className="w-3.5 h-3.5" />
-                    <span>Retry Camera</span>
+                    Choose Photo Now
                   </button>
                 </div>
-              </div>
-            ) : isStartingCamera ? (
-              <div className="space-y-3">
-                <div className="w-8 h-8 border-2 border-white/30 border-t-[#6E2B26] rounded-full animate-spin mx-auto" />
-                <p className="font-mono text-xs uppercase tracking-widest text-[#F2EEE5]/70">
-                  Starting Viewfinder...
-                </p>
-                <p className="font-sans text-[11px] text-[#F2EEE5]/50">
-                  Or tap "Photo" below to scan immediately
-                </p>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
           </div>
         )}
 
