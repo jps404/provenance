@@ -4,6 +4,7 @@
  */
 
 import type { ObserveResponse, InterpretResponse, GeoLocationState } from '../types.ts';
+import { resizeBase64Image } from './camera.ts';
 
 export interface ObserveParams {
   imageBase64: string;
@@ -18,15 +19,25 @@ export interface InterpretParams {
 
 /**
  * Call 1 - OBSERVE: Fast, structured physical observation and VTS docent question.
+ * Downscales image to max 1024px for Observe to reduce vision encoding latency and upload size.
  */
 export async function observeSpecimen(params: ObserveParams): Promise<ObserveResponse> {
   const localDate = new Date().toISOString().split('T')[0];
+
+  let imageBase64 = params.imageBase64;
+  if (typeof window !== 'undefined' && imageBase64) {
+    try {
+      imageBase64 = await resizeBase64Image(imageBase64, 1024, 0.85);
+    } catch {
+      // Fall back to original image if downscaling is unavailable
+    }
+  }
 
   const response = await fetch('/api/observe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      imageBase64: params.imageBase64,
+      imageBase64,
       location: params.location && !params.location.denied ? params.location : undefined,
       localDate,
     }),

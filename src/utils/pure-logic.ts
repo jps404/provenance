@@ -139,7 +139,7 @@ export function cleanAndParseJson<T>(rawText: string, fallback: T): T {
 /**
  * Clamps and normalizes a hotspot bounding box [ymin, xmin, ymax, xmax] in 0-1000 scale.
  * Swaps min/max if inverted.
- * Returns null if the box is smaller than 2% of image area (20,000 / 1,000,000)
+ * Returns null if the box is smaller than 0.2% of image area (2,000 / 1,000,000)
  * or covers more than 90% (900,000 / 1,000,000).
  */
 export function normalizeHotspotBox(box: unknown): [number, number, number, number] | null {
@@ -169,8 +169,8 @@ export function normalizeHotspotBox(box: unknown): [number, number, number, numb
   const width = xmax - xmin;
   const area = height * width;
 
-  // Drop boxes smaller than 2% (20,000) or greater than 90% (900,000) of 1,000,000
-  if (area < 20000 || area > 900000) {
+  // Drop boxes smaller than 0.2% (2,000) or greater than 90% (900,000) of 1,000,000
+  if (area < 2000 || area > 900000) {
     return null;
   }
 
@@ -179,36 +179,86 @@ export function normalizeHotspotBox(box: unknown): [number, number, number, numb
 
 /**
  * Filters and validates a collection of hotspots.
- * Caps at 5 valid hotspots. Returns empty array if none are valid.
+ * Caps at 5 valid hotspots (area >= 2,000 and <= 900,000).
+ * If fewer than 2 valid hotspots survive, keeps the top 2 by area (area > 0 and <= 900,000)
+ * rather than showing 0-1.
  */
 export function filterValidHotspots(rawHotspots: unknown[]): Hotspot[] {
   if (!Array.isArray(rawHotspots)) return [];
 
-  const valid: Hotspot[] = [];
+  interface Candidate {
+    hotspot: Hotspot;
+    area: number;
+    isValid: boolean;
+  }
+
+  const candidates: Candidate[] = [];
 
   for (let idx = 0; idx < rawHotspots.length; idx++) {
     const item = rawHotspots[idx];
     const h = (typeof item === 'object' && item !== null ? item : {}) as Record<string, unknown>;
-    const normalizedBox = normalizeHotspotBox(h.box_2d);
 
-    if (normalizedBox) {
-      valid.push({
-        label: String(h.label || `Feature ${valid.length + 1}`).trim(),
-        box_2d: normalizedBox,
-        feature_story: String(
-          h.feature_story ||
-            'This detail evolved directly in response to earlier functional vulnerabilities or material constraints.'
-        ).trim(),
-        introduced: String(h.introduced || 'uncertain').trim(),
-      });
+    if (!Array.isArray(h.box_2d) || h.box_2d.length < 4) {
+      continue;
     }
 
-    if (valid.length >= 5) {
-      break;
+    let [ymin, xmin, ymax, xmax] = h.box_2d.map((v) => {
+      const num = Number(v);
+      if (isNaN(num)) return 0;
+      return Math.max(0, Math.min(1000, Math.round(num)));
+    });
+
+    if (ymin > ymax) {
+      const temp = ymin;
+      ymin = ymax;
+      ymax = temp;
     }
+    if (xmin > xmax) {
+      const temp = xmin;
+      xmin = xmax;
+      xmax = temp;
+    }
+
+    const height = ymax - ymin;
+    const width = xmax - xmin;
+    const area = height * width;
+
+    // Discard zero-area boxes or boxes covering > 90% of image
+    if (area <= 0 || area > 900000) {
+      continue;
+    }
+
+    const hotspot: Hotspot = {
+      label: String(h.label || `Feature ${candidates.length + 1}`).trim(),
+      box_2d: [ymin, xmin, ymax, xmax],
+      feature_story: String(
+        h.feature_story ||
+          'This detail evolved directly in response to earlier functional vulnerabilities or material constraints.'
+      ).trim(),
+      introduced: String(h.introduced || 'uncertain').trim(),
+    };
+
+    candidates.push({
+      hotspot,
+      area,
+      isValid: area >= 2000,
+    });
   }
 
-  return valid;
+  const valid = candidates.filter((c) => c.isValid).map((c) => c.hotspot);
+
+  // If 2 or more valid hotspots survive, return up to 5
+  if (valid.length >= 2) {
+    return valid.slice(0, 5);
+  }
+
+  // If fewer than 2 valid hotspots survive, keep the top 2 by area rather than showing 0-1
+  if (candidates.length > 0) {
+    const sortedByArea = [...candidates].sort((a, b) => b.area - a.area);
+    return sortedByArea.slice(0, 2).map((c) => c.hotspot);
+  }
+
+  return [];
 }
 
 /**

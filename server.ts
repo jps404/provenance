@@ -25,15 +25,23 @@ const SYSTEM_INSTRUCTION =
   "Never invent names, dates, patents or places; when the record is uncertain, say 'date uncertain' or 'attribution disputed' " +
   "and lower confidence. Prefer the specific over the generic: identify the exact model, building or maker when the evidence supports it.";
 
-// Model fallback chain: gemini-3.6-flash first as it answered reliably, followed by 3.8, 3.5, 3.1
-const MODEL_FALLBACK_CHAIN = [
+// Model fallback chains:
+// Observe: fast lite model first for speed (target <10s)
+const OBSERVE_MODEL_CHAIN = [
+  'gemini-3.5-flash-lite',
+  'gemini-3.6-flash',
+  'gemini-3.1-flash-lite',
+];
+
+// Interpret: 3.6 first (reliable with grounding), followed by 3.8, 3.5, 3.1
+const INTERPRET_MODEL_CHAIN = [
   'gemini-3.6-flash',
   'gemini-3.8-flash',
   'gemini-3.5-flash-lite',
   'gemini-3.1-flash-lite',
 ];
 
-const OBSERVE_TIMEOUT_MS = 15000;
+const OBSERVE_TIMEOUT_MS = 12000;
 const INTERPRET_TIMEOUT_MS = 30000;
 
 function getAiClient(): GoogleGenAI {
@@ -90,7 +98,7 @@ app.post('/api/observe', async (req: Request, res: Response) => {
       `2. Tombstone details: title, maker (or architect/attribution), date, materials, origin, classification.\n` +
       `3. Visual Thinking Strategies (VTS): Formulate exactly ONE open-ended docent question about THIS photograph (e.g., 'What do you notice about where a hand would hold this?' or 'What do the surface textures along the edges suggest to you?'). Do NOT reveal the answers yet.\n` +
       `4. Description: Prown stage 1, 2-3 sentences of purely physical, observable description (geometry, surfaces, joinery, mass).\n` +
-      `5. Hotspots: Choose 3 to 5 large, visually distinct physical features actually visible in this photo. Never place a hotspot on something not visible. For buildings, focus on architectural elements (cornice, arch, lintel, columns, bond, windows). For each feature, explain what earlier failure or human need this design feature answered (Petroski's 'form follows failure') in 2 sentences, plus approximate introduced year or 'uncertain'.\n` +
+      `5. Hotspots: Return 3 to 5 hotspots. For small handheld objects, include distinct small components (cap, cap hole, clip, tip/nib, button, hinge, label) even if they are thin; draw the box tightly around the visible component. Never place a hotspot on something not visible. For buildings, focus on architectural elements (cornice, arch, lintel, columns, bond, windows). For each feature, explain what earlier failure or human need this design feature answered (Petroski's 'form follows failure') in 2 sentences, plus approximate introduced year or 'uncertain'.\n` +
       `Coordinates box_2d are [ymin, xmin, ymax, xmax] normalized to 0-1000 integers.`;
 
     const requestPayload = {
@@ -143,6 +151,8 @@ app.post('/api/observe', async (req: Request, res: Response) => {
             },
             hotspots: {
               type: Type.ARRAY,
+              description:
+                'Return 3 to 5 hotspots. For small handheld objects, include distinct small components (cap, cap hole, clip, tip/nib, button, hinge, label) even if they are thin; draw the box tightly around the visible component.',
               items: {
                 type: Type.OBJECT,
                 properties: {
@@ -184,7 +194,7 @@ app.post('/api/observe', async (req: Request, res: Response) => {
     let modelUsed = '';
     let lastError: unknown = null;
 
-    for (const candidateModel of MODEL_FALLBACK_CHAIN) {
+    for (const candidateModel of OBSERVE_MODEL_CHAIN) {
       const attemptStart = Date.now();
       try {
         response = await withTimeout(
@@ -438,9 +448,9 @@ app.post('/api/interpret', async (req: Request, res: Response) => {
     };
 
     // Try models in order. Only the final model (gemini-3.1-flash-lite) starts without googleSearch.
-    for (let i = 0; i < MODEL_FALLBACK_CHAIN.length; i++) {
-      const candidateModel = MODEL_FALLBACK_CHAIN[i];
-      const isFinalModel = i === MODEL_FALLBACK_CHAIN.length - 1;
+    for (let i = 0; i < INTERPRET_MODEL_CHAIN.length; i++) {
+      const candidateModel = INTERPRET_MODEL_CHAIN[i];
+      const isFinalModel = i === INTERPRET_MODEL_CHAIN.length - 1;
       const useSearch = !isFinalModel; // Keep search on all except the final model
 
       const attemptStart = Date.now();

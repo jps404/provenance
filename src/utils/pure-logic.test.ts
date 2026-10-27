@@ -51,15 +51,19 @@ test('normalizeHotspotBox bounds, swaps inverted coordinates, and enforces area 
     assert.equal(normalized[2], 800);
   }
 
-  // Too small: 10x10 = 100 area (0.01% < 2%)
+  // Too small: 10x10 = 100 area (0.01% < 0.2% = 2,000 threshold)
   const tiny = [100, 100, 110, 110];
   assert.equal(normalizeHotspotBox(tiny), null);
+
+  // Small component: e.g. thin cap/nib 50x50 = 2,500 area (0.25%, >= 0.2% threshold)
+  const smallComponent = [100, 100, 150, 150];
+  assert.deepEqual(normalizeHotspotBox(smallComponent), [100, 100, 150, 150]);
 
   // Too large: 960x960 = 921,600 area (92.16% > 90%)
   const huge = [20, 20, 980, 980];
   assert.equal(normalizeHotspotBox(huge), null);
 
-  // Valid: 200x200 = 40,000 area (4%, within 2%..90%)
+  // Valid standard: 200x200 = 40,000 area (4%, within 0.2%..90%)
   const valid = [100, 100, 300, 300];
   assert.deepEqual(normalizeHotspotBox(valid), [100, 100, 300, 300]);
 });
@@ -78,6 +82,29 @@ test('filterValidHotspots caps at 5 and drops invalid boxes', () => {
   assert.equal(filtered.length, 5);
   assert.equal(filtered[0].label, 'Box 1');
   assert.equal(filtered[4].label, 'Box 5');
+});
+
+test('filterValidHotspots keeps top 2 by area when fewer than 2 valid survive', () => {
+  // Only 1 hotspot has area >= 2000, but there are smaller candidate features (clip, hole)
+  const penFeatures = [
+    { label: 'Pen Barrel', box_2d: [200, 100, 800, 200] }, // area 600 * 100 = 60,000 (valid)
+    { label: 'Vent Hole', box_2d: [120, 140, 130, 150] }, // area 10 * 10 = 100
+    { label: 'Clip', box_2d: [100, 130, 180, 150] }, // area 80 * 20 = 1600 (sub-2000)
+  ];
+  const result = filterValidHotspots(penFeatures);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].label, 'Pen Barrel');
+  assert.equal(result[1].label, 'Clip'); // Top 2 by area kept!
+
+  // Zero valid hotspots (both sub-2000)
+  const tinyPair = [
+    { label: 'Nib', box_2d: [500, 500, 530, 520] }, // area 30 * 20 = 600
+    { label: 'Cap Hole', box_2d: [100, 100, 110, 120] }, // area 10 * 20 = 200
+  ];
+  const tinyResult = filterValidHotspots(tinyPair);
+  assert.equal(tinyResult.length, 2);
+  assert.equal(tinyResult[0].label, 'Nib');
+  assert.equal(tinyResult[1].label, 'Cap Hole');
 });
 
 test('shouldGateConfidence gates Low confidence and unknown kind', () => {

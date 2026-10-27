@@ -199,6 +199,6 @@ export function resizeBase64Image(
       resolve(canvas.toDataURL('image/jpeg', quality));
     };
     img.onerror = () => resolve(dataUrl);
-    img.src = dataUrl;
+    img.src = dataUrl.startsWith('data:') ? dataUrl : `data:image/jpeg;base64,${dataUrl}`;
   });
 }
